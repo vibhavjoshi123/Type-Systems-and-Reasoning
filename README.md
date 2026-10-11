@@ -1,5 +1,18 @@
 # Type Systems and Reasoning
 
+## The shape of it
+
+```
+the rule          a tree of obligations, declared as data
+                  ↓
+the procedure     tactics: split a goal, ask the database, ask the model
+                  ↓           ↓
+the database      exact answers        the model     judgements
+(5 of 6 goals)    free, no variance    (1 of 6)      one number, calibrated
+                  ↓
+the judge         the database again — the procedure cannot store anything
+```
+
 ## The case: portfolio eligibility
 
 A fund's written policy, six testable parts. Asking one question of each —
@@ -24,6 +37,10 @@ That one question, and only that one, goes to Jev.
   one holding's index weight from 77.82% to 53.38%, four levels up the call
   chain, with nothing told to update. **Nothing can go stale because nothing
   is cached.**
+- **The policy lives in one place.** The 4.0 threshold is a line in a
+  database function, not a constant in a program. Moving it is one
+  `redefine`, and every consumer follows — the nightly job, an ad-hoc
+  query, a dashboard.
 - A verdict links the specific coverage relations and price bars it was
   computed from **as role players, not copied values**. "Why?" is a graph
   walk.
