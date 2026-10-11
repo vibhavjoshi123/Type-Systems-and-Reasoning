@@ -15,8 +15,13 @@ the judge         the database again — the procedure cannot store anything
 
 ## The case: portfolio eligibility
 
-A fund's written policy, six testable parts. Asking one question of each —
-*could I write a formula for this?* — splits them cleanly:
+A fund holds equities. Its investment policy says which may stay, and
+something has to re-check every holding nightly — analysts revise ratings,
+coverage starts and stops, filings arrive late. A holding that qualified
+yesterday may not today, and nobody notices unless something checks.
+
+The policy has six testable parts. Asking one question of each — *could I
+write a formula for this?* — splits them cleanly:
 
 - **Five are arithmetic.** Count the analysts, average the ratings, measure
   the spread. TypeDB functions answer these exactly, for free, with no
