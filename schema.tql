@@ -1,0 +1,231 @@
+# TypeDB schema additions: provenance types and derived reasoning
+#
+# The base model is TypeDB's published "agentic-finance" example (securities,
+# analysts, coverage relations, price bars, indices). It is used unmodified;
+# everything below is a pure `define`, so applying it leaves the original
+# model intact and its four shipped functions keep returning the same answers.
+#
+# Two things are added.
+#
+#   1. PROVENANCE. The base schema has none. `market_cap` is correct the
+#      instant it is asked, but an agent that *reports* a figure leaves no
+#      record of which price bar it used. The types below make an asserted
+#      value carry its own inputs as role players, so a claim cannot drift
+#      from its evidence.
+#
+#   2. DERIVED REASONING. Fourteen functions answering questions the shipped
+#      four cannot: how far apart the analysts are, whether a name is
+#      contested, what share of an index one holding accounts for, and the
+#      policy thresholds themselves.
+#
+# Functions are defined in a separate block from the types so that a function
+# that fails to define cannot take the type schema down with it.
+
+define
+
+# ── provenance attributes ────────────────────────────────────────────
+attribute claim_id, value string;
+attribute claim_kind, value string
+    @values("market_cap", "consensus_rating", "price_change", "index_weight",
+            "rating_dispersion", "portfolio_eligibility");
+attribute claim_value, value double;
+attribute asserted_at, value datetime;
+attribute asserted_by, value string;      # which agent or analyst asserted it
+attribute source_kind, value string
+    @values("computed", "analyst_asserted", "vendor_feed", "expert_curated");
+attribute confidence, value double @range(0.0..1.0);
+attribute rationale, value string;
+attribute is_current, value boolean;
+
+# A decision, as distinct from a measurement. `claim_value` is a double and
+# cannot hold "reject"; an eligibility verdict needs its own attribute, and
+# the prong trace that produced it needs to travel with it or the verdict is
+# unauditable.
+attribute decision, value string
+    @values("include", "review", "reject");
+attribute prong_trace, value string;
+
+# ── the derived claim ────────────────────────────────────────────────
+# An n-ary relation: the claim, what it is about, and every input it was
+# computed from, in one atomic record. The inputs are role players rather
+# than copied values, so the claim cannot drift from its evidence.
+relation derived_claim,
+    relates about @card(1),                    # the security the claim concerns
+    relates from_price @card(0..),             # price bars that fed it
+    relates from_coverage @card(0..),          # coverage relations that fed it
+    relates within @card(0..1),                # an index, for weight claims
+    owns claim_id @key,
+    owns claim_kind,
+    owns claim_value,
+    owns asserted_at,
+    owns asserted_by,
+    owns source_kind,
+    owns confidence,
+    owns rationale,
+    owns is_current,
+    owns decision,
+    owns prong_trace;
+
+security plays derived_claim:about @card(0..);
+price_bar plays derived_claim:from_price @card(0..);
+index plays derived_claim:within @card(0..);
+
+# A coverage relation playing a role in another relation: this is what lets
+# a consensus claim point at the individual ratings it averaged, the same
+# way the IAM example has `access` play `permitted-access`.
+coverage plays derived_claim:from_coverage @card(0..);
+
+# ── morphisms: relations between claims ──────────────────────────────
+relation claim_morphism @abstract,
+    relates earlier @card(1..),
+    relates later @card(1..),
+    owns claim_id @key,
+    owns rationale,
+    owns asserted_at,
+    owns asserted_by;
+
+# A restatement: the same claim recomputed on fresher inputs. The old one
+# is kept, so "what did we say on Tuesday, and why" stays answerable.
+relation supersedes_claim, sub claim_morphism;
+
+# Two claims that cannot both stand — e.g. two vendors disagreeing.
+relation contradicts_claim, sub claim_morphism;
+
+derived_claim plays claim_morphism:earlier @card(0..);
+derived_claim plays claim_morphism:later @card(0..);
+# Self-referential, so a morphism can relate morphisms to any depth.
+claim_morphism plays claim_morphism:earlier @card(0..);
+claim_morphism plays claim_morphism:later @card(0..);
+
+# ════════════════════════════════════════════════════════════════════
+# FUNCTIONS
+# ════════════════════════════════════════════════════════════════════
+
+define
+
+# How far apart the analysts are. Dispersion, not consensus: a mean of 3
+# hides the difference between everyone saying 3 and a 1-vs-5 split.
+fun rating_spread($s: security) -> integer:
+  match
+    $cov isa coverage, links (covered: $s), has rating $r;
+  reduce $hi = max($r), $lo = min($r);
+  match
+    let $spread = $hi - $lo;
+  return first $spread;
+
+# Contested = the analysts materially disagree. A boolean the agent can
+# branch on, rather than a number it has to threshold itself.
+fun is_contested($s: security) -> boolean:
+  match
+    let $spread in rating_spread($s);
+    $spread >= 2;
+  return check;
+
+# How many distinct analysts cover a name. Breadth, which consensus alone
+# does not tell you: one 5 and ten 5s are the same mean.
+fun coverage_breadth($s: security) -> integer:
+  match
+    $cov isa coverage, links (covered: $s, analyst: $a);
+  select $a;
+  distinct;
+  return count;
+
+# Total market cap of an index's constituents.
+fun index_market_cap($i: index) -> double:
+  match
+    index_membership (basket: $i, constituent: $s);
+    $s isa equity;
+    let $each in market_cap($s);
+  reduce $total = sum($each);
+  return first $total;
+
+# Market cap of a security as a share of its index's total. Composed over
+# index_market_cap, which composes over their market_cap, which composes
+# over their latest_price — reasoning stacked on their functions rather
+# than replacing them.
+fun index_weight($s: equity, $i: index) -> double:
+  match
+    index_membership (basket: $i, constituent: $s);
+    let $mine in market_cap($s);
+    let $total in index_market_cap($i);
+    let $weight = $mine / $total;
+  return first $weight;
+
+# Constituents nobody covers — a gap in the research, which is the kind of
+# question a terminal should be able to answer and theirs cannot.
+fun uncovered_constituents($i: index) -> { equity }:
+  match
+    index_membership (basket: $i, constituent: $s);
+    $s isa equity;
+    not { $cov isa coverage, links (covered: $s); };
+  return { $s };
+
+# Securities on more than one venue.
+fun venue_count($s: security) -> integer:
+  match
+    listing (listed: $s, venue: $v);
+  select $v;
+  distinct;
+  return count;
+
+# ── provenance-aware reads ───────────────────────────────────────────
+
+# The claims that still stand for a security: asserted, not superseded.
+fun current_claims($s: security) -> { derived_claim }:
+  match
+    $c isa derived_claim, links (about: $s), has is_current true;
+    not { supersedes_claim (earlier: $c); };
+  return { $c };
+
+# Everything a claim was computed from. This is the question their schema
+# cannot answer at all: not "what is the market cap" but "what was the
+# market cap we reported, and off which price".
+fun claim_inputs($c: derived_claim) -> { price_bar }:
+  match
+    $c isa derived_claim, links (from_price: $b);
+  return { $b };
+
+# The portfolio gate, as the schema states it. Three prongs, conjunctive:
+# covered by at least two analysts, consensus at least 4, and not contested.
+# Jev evaluates each prong against state assembled from these functions —
+# the schema says WHAT the test is, Jev says whether it holds.
+fun meets_coverage_floor($s: security) -> boolean:
+  match
+    let $n in coverage_breadth($s);
+    $n >= 2;
+  return check;
+
+fun meets_consensus_floor($s: security) -> boolean:
+  match
+    let $r in consensus_rating($s);
+    $r >= 4.0;
+  return check;
+
+# Decisions that still stand for a security.
+fun current_decision($s: security) -> { derived_claim }:
+  match
+    $c isa derived_claim, links (about: $s),
+      has claim_kind "portfolio_eligibility", has is_current true;
+    not { supersedes_claim (earlier: $c); };
+  return { $c };
+
+# ── the second disjunct of IPS 2.2 ───────────────────────────────────
+
+# At least one analyst with top conviction. This exists so the eligibility
+# test has a genuine disjunction: a name can clear IPS 2.2 either on the
+# mean or on a single strong call. The search tries the mean first because
+# it is the cheaper read, and falls back to this one — which is where
+# backtracking stops being decoration.
+fun has_strong_conviction($s: security) -> boolean:
+  match
+    $cov isa coverage, links (covered: $s), has rating 5;
+  return check;
+
+# Covered by at least three analysts. The second disjunct of IPS 2.2 needs
+# a breadth floor of its own: a single top call should only carry a holding
+# when enough houses are looking at it.
+fun has_broad_coverage($s: security) -> boolean:
+  match
+    let $n in coverage_breadth($s);
+    $n >= 3;
+  return check;
