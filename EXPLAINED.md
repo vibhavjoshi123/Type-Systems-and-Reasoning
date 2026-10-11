@@ -448,99 +448,94 @@ component that decides what is true.
 
 93 test cases, correct answers worked out in advance from the rule itself.
 
-### The 93-case result
+### The result
 
-| | correct | model calls | reasoning tokens | cost |
+Nine arms. `n` is the number of cases that returned a parseable answer;
+transport and content-filter failures are excluded rather than counted as
+wrong.
+
+| | correct | n | reasoning tokens | cost |
 |---|---|---|---|---|
-| **this approach** | **93/93** | **57** | **0** | **$0.0008** |
-| claude-opus-5.5, direct | 93/93 | 93 | 6,976 | $0.3316 |
-| grok-4.7, step-by-step | 93/93 | 93 | 35,463 | $0.3290 |
-| gpt-6.1-sol-pro, step-by-step | 93/93 | 93 | 6,672 | $0.5627 |
-| claude-opus-5.5, step-by-step | 93/93 | 92 | 9,369 | $0.9203 |
+| **this approach** | **100%** | 93 | **0** | **$0.0008** |
+| gpt-4o, answering directly | **72.6%** | 84 | 0 | $0.0707 |
+| llama-3.3-70b, step-by-step | 90.3% | 93 | 0 | $0.0057 |
+| gpt-4o-mini, step-by-step | 98.9% | 93 | 0 | $0.0214 |
+| gpt-4o, step-by-step | **100%** | 88 | 0 | $0.3213 |
+| claude-opus-5.5, direct | 100% | 93 | 7,099 | $0.3389 |
+| claude-opus-5.5, step-by-step | 100% | 92 | 9,150 | $0.9271 |
+| gpt-6.1-sol-pro, step-by-step | 100% | 93 | 6,811 | $0.5642 |
+| grok-4.7, step-by-step | 100% | 93 | 36,884 | $0.3367 |
 
-**100% for every arm, in every stratum** — including all 12
-`route_b_rescue` cases and all 19 `unknowable` cases, where every model
-answered `review` rather than treating a missing document as a failure.
+### Where the failures are
 
-Repeated three times each on the 31 hardest cases, every arm returned the
-same verdict every time. Determinism is a tie too.
+Accuracy per stratum. The two columns that matter are `route_b_rescue` —
+route (a) fails and route (b) has to be tried — and `unknowable`, where the
+description is missing.
 
-So, plainly: **on this task a current frontier model is as accurate and as
-consistent as a formal pipeline.** An earlier version of this document
-claimed otherwise. That claim was measured against gpt-4o and did not
-survive better baselines; it is withdrawn rather than quietly edited out.
+| stratum | n | ours | gpt-4o direct | llama-3.3 | gpt-4o step | frontier (×4) |
+|---|---|---|---|---|---|---|
+| `route_b_rescue` | 12 | 100% | **33%** | 75% | 100% | 100% |
+| `unknowable` | 19 | 100% | **24%** | 84% | 100% | 100% |
+| `route_a_pass` | 7 | 100% | 71% | 86% | 100% | 100% |
+| `breadth_fail` | 5 | 100% | 100% | 60% | 100% | 100% |
+| `both_routes_fail` | 31 | 100% | 93% | 100% | 100% | 100% |
+| `judgement_no` | 19 | 100% | 100% | 100% | 100% | 100% |
+
+gpt-4o answering directly fails **exactly where the structure predicts**: it
+gets two of three backtracking cases wrong, and on missing evidence it
+rejects 13 of 19 holdings — naming the clause it had no evidence for, then
+treating absence as failure.
+
+### The finding: the search is the capability, not the model
+
+Read the table by what each arm *does*, not by how new it is:
+
+| how the search happens | accuracy |
+|---|---|
+| not at all — answer directly | 72.6% |
+| written out in the model's own output | **100%** |
+| internally, as reasoning tokens | **100%** |
+| externally, as database calls | **100%** |
+
+**The same model that scores 72.6% answering directly scores 100% when told
+to work through the clauses.** Nothing about its weights changed. Forcing
+the search into the output is what fixed it.
+
+So the failure mode is real, and it attaches to *not doing the search* —
+not to being a language model. Recent models do it internally by default,
+which is why they need no instruction. Older ones need to be told. And this
+approach does it in the open.
+
+### Self-reported confidence is not a signal
+
+Mean stated confidence when right versus when wrong:
+
+```
+gpt-4o direct        right 0.96   wrong 0.91    separation +0.05
+llama-3.3-70b        right 0.87   wrong 0.78    separation +0.09
+gpt-4o-mini          right 0.92   wrong 1.00    separation −0.08
+```
+
+gpt-4o-mini is *more* confident when it is wrong. A number a model reports
+about itself does not separate its right answers from its wrong ones.
+Contrast the decision model on the one question it is asked: 0.97–0.98 with
+a description present, 0.50 with none.
 
 ### What is left is compute
 
-| | cost | vs. this approach |
-|---|---|---|
-| this approach | $0.0008 | — |
-| grok-4.7 | $0.3290 | 411× |
-| claude-opus-5.5, direct | $0.3316 | 415× |
-| gpt-6.1-sol-pro | $0.5627 | 703× |
-| claude-opus-5.5, step-by-step | $0.9203 | **1,150×** |
+Four frontier models match this approach on accuracy and on stability — all
+of them returned identical verdicts across three repeats of the 31 hardest
+cases. An earlier version of this document claimed they would fail at
+backtracking and missing evidence. Against *current* models that is false,
+and the claim is withdrawn rather than quietly edited out.
 
-Two causes. **57 model calls instead of 93** — thirty-six cases were settled
-by arithmetic and never reached a model, and for those the description was
-never even fetched. And each of the 57 is one typed yes/no question of 348
-input tokens with **no deliberation tokens at all**, against 6,672 to 35,463
-for the model arms.
+What remains is **57 model calls instead of 93**, because thirty-six cases
+were settled by arithmetic and never reached a model, and **zero
+deliberation tokens** against 6,811 to 36,884 — a 400× to 1,150× cost
+difference for the same answers.
 
-Note also that instructing opus to work step by step **tripled its cost**
-($0.33 → $0.92) for identical accuracy. The instruction bought nothing on a
-task the model already handled.
-
-At a thousand holdings nightly: roughly $3.60 a night with the cheapest
-model, $10 with the step-by-step one, or **under a penny** here.
-
-### The older generation does fail
-
-Measured separately, on three representative cases at ten runs each —
-a probe, not the 93-case benchmark, and labelled as such:
-
-| case | correct | gpt-4o, 10 runs |
-|---|---|---|
-| clear reject | `reject` | reject 8, review 2 |
-| route (b) rescue | `include` | review 6, **include 2**, reject 2 |
-| missing description | `review` | **reject 9**, review 1 |
-
-Its mean stated confidence across all three was 0.92–0.94 — including on the
-case it got wrong eight times in ten. On the third case it rejects a holding
-nine times in ten, correctly naming the clause it had no evidence for and
-then treating absence as failure.
-
-
-### Why the recent models succeed
-
-They emit **reasoning tokens** — an internal deliberation step before
-answering. Older models do not. Here is what one of them actually thought on
-the hard case (ratings 1, 4, 5 — Way A fails, Way B rescues):
-
-> *"Three distinct analysts satisfies IPS 2.1. For 2.2, option (a) fails
-> since the mean of 3.33 is below threshold and the spread is too wide, **but
-> option (b) passes** because Maria Garcia rates it a 5 and three analysts
-> cover it. The semiconductor and computing hardware focus aligns with
-> Technology under IPS 3.1, so this one should be included."*
-
-Against our own steps on the same case:
-
-| what the model thought | what the search did |
-|---|---|
-| "three analysts satisfies 2.1" | ✓ asked the database |
-| "option (a) fails … mean of 3.33" | ✗ asked the database |
-| "**but option (b) passes**" | ✓ asked the database |
-| "and three analysts cover it" | ✓ asked the database |
-| "aligns with Technology" | ✓ asked the model |
-
-**The same five steps, in the same order, including the backtrack.** The
-model does the search internally, in hidden prose. That is the whole reason
-the accuracy gap closed: what this system implements as explicit control
-flow, recent models have as learned behaviour.
-
-Which says what the approach is actually for. It is not better at the
-search. It makes the search **external** — readable, replayable, auditable —
-and reaches the same verdicts with **no deliberation tokens at all**,
-because the steps are database calls rather than generated text.
+At a thousand holdings nightly: roughly $3.60 with the cheapest frontier
+model, $10 with the step-by-step one, or under a penny here.
 
 ---
 

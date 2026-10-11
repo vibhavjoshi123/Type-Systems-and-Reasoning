@@ -12,24 +12,21 @@ and what follows from it — is the whole subject.
 ## The result, up front
 
 93 test cases, correct answers derived from the rule itself in advance, so
-neither side marks its own homework.
+neither side marks its own homework. Nine arms:
 
-| | correct | model calls | reasoning tokens | cost |
-|---|---|---|---|---|
-| **this approach** | **93/93** | **57** | **0** | **$0.0008** |
-| claude-opus-5.5 | 93/93 | 93 | 6,976 | $0.3316 |
-| grok-4.7 | 93/93 | 93 | 35,463 | $0.3290 |
-| gpt-6.1-sol-pro | 93/93 | 93 | 6,672 | $0.5627 |
-| claude-opus-5.5, told to think step by step | 93/93 | 92 | 9,369 | $0.9203 |
+- **This approach — 100%**, 57 model calls, **zero** reasoning tokens, **$0.0008**
+- **Four current frontier models — 100% each**, 93 calls, 6,811–36,884 reasoning tokens, $0.34–$0.93
+- **gpt-4o answering directly — 72.6%**, failing at backtracking (33%) and missing evidence (24%)
+- **gpt-4o told to work step by step — 100%**
 
-**Current frontier models get this task right.** So do we. The difference is
-compute: **400 to 1,150× less cost, and no deliberation tokens at all**,
-because five of the six questions never reach a model and the sixth is asked
-something with a one-number answer.
+That last pair is the finding. **The same model, 72.6% answering directly
+and 100% when made to work through the clauses.** Nothing about its weights
+changed — writing the search down is what fixed it.
 
-Earlier-generation models do *not* get it right, and the reason is
-instructive rather than embarrassing for them — see
-[the comparison](WALKTHROUGH.md#8-compared-against-language-models).
+So the capability is the *search*, not the model. Recent models run it
+internally, which is why they need no instruction and why they match us on
+accuracy. What differs is 400–1,150× in compute, and whether the reasoning
+is visible.
 
 ## What is in here
 
