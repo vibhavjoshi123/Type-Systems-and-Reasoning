@@ -229,3 +229,72 @@ fun has_broad_coverage($s: security) -> boolean:
     let $n in coverage_breadth($s);
     $n >= 3;
   return check;
+
+# ════════════════════════════════════════════════════════════════════
+# MANDATE SLEEVE PREDICATES
+# (see PROPOSER.md — the five-way disjunction these support)
+# ════════════════════════════════════════════════════════════════════
+
+define
+
+# ── momentum ─────────────────────────────────────────────────────────
+# Is the most recent bar above the one before it? Two reads of the same
+# price series, so it composes over their `latest_price` rather than
+# duplicating the sort.
+fun previous_price($s: security) -> double:
+  match
+    pricing (instrument: $s, bar: $b);
+    $b has price $p, has as_of $t;
+    let $px = $p;
+  sort $t desc;
+  offset 1;
+  return first $px;
+
+fun price_is_rising($s: security) -> boolean:
+  match
+    let $now in latest_price($s);
+    let $before in previous_price($s);
+    $now > $before;
+  return check;
+
+# ── size ─────────────────────────────────────────────────────────────
+fun is_small_cap($e: equity) -> boolean:
+  match
+    let $m in market_cap($e);
+    $m < 150000000000.0;
+  return check;
+
+fun is_mega_cap($e: equity) -> boolean:
+  match
+    let $m in market_cap($e);
+    $m >= 1000000000000.0;
+  return check;
+
+# ── index standing ───────────────────────────────────────────────────
+fun in_tracked_index($s: security) -> boolean:
+  match
+    $i isa index, has name "Nasdaq 100";
+    index_membership (basket: $i, constituent: $s);
+  return check;
+
+fun is_index_heavyweight($e: equity) -> boolean:
+  match
+    $i isa index, has name "Nasdaq 100";
+    let $w in index_weight($e, $i);
+    $w >= 0.10;
+  return check;
+
+# ── distribution of opinion ──────────────────────────────────────────
+fun has_no_bears($s: security) -> boolean:
+  match
+    not { $cov isa coverage, links (covered: $s), has rating 1; };
+    not { $cov2 isa coverage, links (covered: $s), has rating 2; };
+    $any isa coverage, links (covered: $s);
+  return check;
+
+# ── listing breadth ──────────────────────────────────────────────────
+fun is_cross_listed($s: security) -> boolean:
+  match
+    let $v in venue_count($s);
+    $v >= 2;
+  return check;

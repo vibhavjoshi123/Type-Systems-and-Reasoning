@@ -56,8 +56,23 @@ That one question, and only that one, goes to Jev.
   three permitted values is refused by the database:
   `[CNT8] value '"probably-fine"' does not match the set of values`.
 
+## Does a decision model help the search?
+
+The architecture says the model should *propose* which branch to try next,
+with the type system fixing what is admissible. That front half was built
+and measured, and in this domain it does not pay: a model ordering is 9
+queries worse than sorting by a hand-written constant once both see the
+same facts, and computing the qualifying branch directly from the schema
+beats both. Branch selection here has a closed form, and anything with a
+closed form belongs in the type system — the search heuristic included.
+
+[PROPOSER.md](PROPOSER.md) has the five-way disjunction, the eight
+orderings measured, and the two soundness defects found in the guarantee
+that a proposer can only reorder.
+
 ---
 
 [EXPLAINED.md](EXPLAINED.md) — from scratch ·
+[PROPOSER.md](PROPOSER.md) — does the model help the search? ·
 [WALKTHROUGH.md](WALKTHROUGH.md) — the technical account ·
 [schema.tql](schema.tql) — the TypeDB additions
