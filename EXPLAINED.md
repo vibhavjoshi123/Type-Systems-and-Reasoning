@@ -1,584 +1,605 @@
-# Explained from scratch
+# The overtime exemption, explained
 
-Same material as the [walkthrough](WALKTHROUGH.md), assuming no familiarity
-with type systems or theorem provers. Every term is defined where it first
-appears; there is a [glossary](#glossary) at the end.
+Everything in one place: the problem, the data model, the rulebook, what the
+database settles, what the model settles, a worked determination traced call
+by call, and the measurements.
 
----
+Every figure here came from a run against a live TypeDB instance and live
+calls to a decision model.
 
-## 1. The job
-
-A fund owns shares. Someone wrote a rule for which shares may stay. It has
-three parts, and **all three** must be true:
-
-1. **At least two analysts** cover the stock.
-2. It **clears a quality bar** — two different ways, either one is enough:
-   - **Way A**: average rating 4.0 or better, *and* the analysts mostly agree.
-   - **Way B**: at least one analyst gives it 5 out of 5, *and* at least
-     three analysts follow it.
-3. The company's **written description of its business** matches the
-   **industry** it is filed under.
-
-Apply that to every holding, every night, and be able to answer three
-questions the next morning: what was decided and why, what was *not* known,
-and whether the chain of reasoning can be trusted.
+1. [The problem](#1-the-problem)
+2. [The data model](#2-the-data-model)
+3. [The 19 tests a function settles](#3-the-19-tests-a-function-settles)
+4. [The rulebook as a tree](#4-the-rulebook-as-a-tree)
+5. [What goes to the model, and why](#5-what-goes-to-the-model-and-why)
+6. [The search](#6-the-search)
+7. [One determination, traced](#7-one-determination-traced)
+8. [Measurements](#8-measurements)
+9. [How a reviewer gets evidence](#9-how-a-reviewer-gets-evidence)
 
 ---
 
-## 2. The data
+## 1. The problem
 
-Analysts rate stocks 1 to 5. Eight ratings exist:
+In the US most employees must be paid overtime beyond 40 hours a week. Some
+are **exempt**: no overtime however many hours they work.
 
-| | Jane Doe | John Smith | Maria Garcia | average | highest − lowest |
-|---|---|---|---|---|---|
-| **AAPL** | 5 | 4 | 4 | 4.33 | 1 |
-| **NVDA** | 5 | 5 | — | 5.00 | 0 |
-| **TSLA** | 3 | 2 | 4 | 3.00 | 2 |
+Getting it wrong is expensive in both directions. Classify someone exempt
+who is not and you owe years of back pay. The question is litigated
+constantly, and almost always over the same thing — not the salary, which
+nobody disputes, but what the person actually *does*.
 
-Each company has a one-line business description — **except TSLA, which has
-none.** That gap turns out to be the most interesting case here.
+**29 USC § 213(a)** creates the exemption. **29 CFR Part 541** defines it.
+Five categories, any one sufficient:
 
-A rating is stored on **the act of one analyst covering one stock**, not on
-the analyst and not on the stock. The reason: a verdict later needs to point
-back at the specific ratings behind it. You can point at a record. You
-cannot point at a number flattened into a column with twenty others.
-
----
-
-## 3. What a database function is
-
-This is the central idea. Here it is as a spreadsheet.
-
-You want AAPL's average rating in a cell. Two ways:
-
-- **Type the answer.** Work out 5 + 4 + 4 = 13, ÷ 3 = 4.33, type `4.33`.
-- **Type a formula.** Type `=AVERAGE(B2:B4)`. The cell shows 4.33.
-
-On screen, identical. Then Maria Garcia changes her 4 to a 1:
-
-- The typed number still reads `4.33`. **It is now wrong**, until a human
-  remembers to retype it.
-- The formula reads `3.33` immediately. Nobody did anything.
-
-**A TypeDB function is the formula.** It lives in the database and is worked
-out fresh every time it is asked:
-
-```typeql
-fun consensus_rating($s: security) -> double:
-  match
-    $cov isa coverage, links (covered: $s, analyst: $a);
-    $cov has rating $r;
-  return mean($r);
-```
-
-*Given a stock, find every coverage record about it, take the rating off
-each, return the mean.* `-> double` means the answer is a decimal.
-
-Proof from a real run:
-
-```
-before   consensus = 4.3333     meets_floor = True
-         ← one coverage record rewritten. No "recalculate" command.
-after    consensus = 3.3333     meets_floor = False
-```
-
-**No stale number, because no stored number.**
-
-### A function that answers yes or no
-
-The rule asks *is the average 4.0 or better?* So:
-
-```typeql
-fun meets_consensus_floor($s: security) -> boolean:
-  match
-    let $r in consensus_rating($s);      ← this function calls the other one
-    $r >= 4.0;                           ← the policy's threshold
-  return check;                          ← true if that was satisfiable
-```
-
-`-> boolean` means `true` or `false`. Not a score, not a likelihood.
-
-### Formulas on formulas
-
-Spreadsheet formulas can use cells containing other formulas. So can these.
-The deepest chain is four levels:
-
-```
-index_weight          "what share of the Nasdaq 100 is AAPL?"
-  needs market_cap            "AAPL's total value"
-          needs latest_price       "AAPL's most recent price"
-  needs index_market_cap      "the index's total value"
-          needs market_cap         "…for every constituent"
-                  needs latest_price
-```
-
-I inserted **one new price, for NVDA**:
-
-```
-AAPL weight   77.82%  →  53.38%
-```
-
-Nothing about AAPL changed. The index grew, so AAPL is a smaller share of
-it — and the right answer appeared four levels up with nothing told to
-update. With stored numbers you would need a system that knows *"a new price
-for any company changes every other company's index weight"*. That system is
-where bugs live. Here it need not exist.
-
-### Why the rule goes in the database too
-
-`meets_consensus_floor` contains **4.0**. That is the policy, not data about
-companies. I changed it to 3.0 — one line, in the database:
-
-```
-floor 4.0  →  AAPL does not meet it
-floor 3.0  →  AAPL meets it
-```
-
-**No program edited, no data migrated.** Everything asking the question gets
-the new answer, because there is one definition of it. Compute the average
-in your own program instead and the policy exists in two places, and one day
-they disagree.
-
-**The cost, honestly:** a function call takes 251.7 ms; a raw ratings fetch
-takes 254.8 ms. So functions lose on *round trips* — three to five calls per
-stock where a program could fetch once and compute locally. What you buy is
-the single definition.
-
----
-
-## 4. Who can answer each question
-
-Take the rule and ask of each piece: **could I write a formula for this?**
-
-| question | formula? | why |
+| category | regulation | turns on |
 |---|---|---|
-| at least two analysts? | **yes** | count the records |
-| average 4.0 or better? | **yes** | add, divide, compare |
-| do the analysts agree? | **yes** | highest − lowest, under 2? |
-| anyone rated it 5? | **yes** | is 5 among them |
-| at least three analysts? | **yes** | count again |
-| does *"Designs GPUs and accelerated-computing platforms"* match *"Technology"*? | **no** | — |
+| Executive | § 541.100 | managing a department; hiring and firing |
+| Administrative | § 541.200 | business operations; discretion on significant matters |
+| Professional | § 541.300 | advanced knowledge, or creative originality |
+| Computer | § 213(a)(17) | systems analysis, design, programming |
+| Outside Sales | § 541.500 | making sales away from the premises |
 
-Five yes, one no. The five are arithmetic: a formula answers them exactly,
-instantly, for nothing. The sixth is not — there is no sum to perform on
-those words.
+Plus two gates that apply regardless: the employer must clear the
+**§ 203(s)** revenue floor of $500,000, and some roles are **never** exempt
+however they are paid — **§ 541.3** names blue-collar work, police, fire
+fighters and paramedics.
 
-### Proof that the sixth cannot be written
+---
 
-Three companies, built on purpose:
+## 2. The data model
 
-```
-NVDA    "Designs GPUs."                industry Technology    consistent
-TSLA    (no description)               industry Automotive    absent
-WEIRD   "Runs a chain of bakeries."    industry Technology    contradicts
-```
+Seven entities, six relations, 30 attributes. Three choices in it are
+load-bearing.
 
-The closest formula anyone can write — *does the description contain the
-industry name?*
+The employee records used throughout are a synthetic fixture of 25 people,
+each built to exercise a particular clause — a teacher under the salary
+threshold for § 541.303, a help-desk technician for § 541.401's exclusion, a
+paramedic for § 541.3's categorical bar.
+
+### A missing description is legal
 
 ```typeql
-consistent(NVDA)  → False     ← wrong. "Designs GPUs." plainly IS Technology.
-consistent(TSLA)  → False
-consistent(WEIRD) → False
+entity employee,
+    owns emp_id @key,
+    owns job_title @card(1),
+    owns job_description @card(0..1),     # 0..1, deliberately
+    owns weekly_salary @card(0..1),
+    owns hire_fire_authority @card(0..1),
+    ...
 ```
 
-`false` for all three, and it gets the **easy** case wrong: the word
-"Technology" is simply not in NVDA's sentence. A formula that fails the
-obvious case cannot be trusted on the ambiguous one.
+`@card(0..1)` means an employee may have no description on file. That is not
+an oversight. § 541.2 says a title establishes nothing, so with no
+description the duty tests cannot be settled *either way* — and the system
+must be able to say so rather than guess. Section 7 shows what that produces.
 
-So the sixth question, **and only the sixth**, goes to a language model.
-That is the entire division of labour, and it is forced by the data rather
-than chosen.
+### Classifications live in data, not in code
 
-> An earlier version of this sent *"is the average at least 4.0?"* to the
-> model, which answered **0.05** where the database returns `false`. Slower,
-> paid for, and less precise. Asking a model to do arithmetic is not
-> neutral; it is strictly worse.
+```typeql
+entity occupation,
+    owns occupation_code @key,
+    owns name @card(1),
+    owns classification @card(0..);       # multi-valued
+```
+
+So § 541.3's categorical bar, § 541.401's exclusion of help desk and
+hardware repair, and § 541.303's salary-test exemption for teachers and
+lawyers are all **rows**. When the DOL moves an occupation between
+categories that is an `insert`, not a schema migration and not a code change.
+
+### Supervision is one n-ary relation, counted in FTE
+
+```typeql
+relation supervision,
+    relates supervisor @card(1),
+    relates supervised @card(1..);        # the whole span, not one edge each
+```
+
+§ 541.104 counts **full-time equivalents**, not heads — two half-time staff
+is 1.0 FTE, not two people. Getting that wrong is a real misclassification,
+so the sum is over the relation's role players and the rule is written once.
 
 ---
 
-## 5. The search
+## 3. The 19 tests a function settles
 
-The **search** walks the checklist, under three rules:
+Five shapes cover all of them.
 
-1. **Ask the cheap questions first.**
-2. **Stop as soon as the answer is settled.**
-3. **Write down every step, including the failures.**
+**Threshold over a stored number.** Reused by four separate goals, because
+four places in the regulation cite the same figure:
 
-It has three ways of trying to settle a question, called **tactics**, and
-the order matters:
+```typeql
+fun meets_salary_threshold($e: employee) -> boolean:
+  match
+    $e has weekly_salary $s;
+    $s >= 684.0;                          # § 541.600(a)
+  return check;
+```
 
-| tactic | what it does |
+**Reading a boolean somebody recorded:**
+
+```typeql
+fun paid_on_salary_basis($e: employee) -> boolean:
+  match $e has salary_guaranteed true;    # § 541.602
+  return check;
+```
+
+**A classification lookup** — the pattern five goals use:
+
+```typeql
+fun is_categorically_nonexempt($e: employee) -> boolean:
+  match
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "categorically_nonexempt";   # § 541.3
+  return check;
+```
+
+**Aggregate, then threshold** — split in two on purpose, so the § 541.104
+FTE rule is stated once and the threshold separately:
+
+```typeql
+fun supervised_fte($e: employee) -> double:
+  match
+    supervision (supervisor: $e, supervised: $p);
+    $p has fte $f;
+  return sum($f);
+
+fun directs_two_or_more_fte($e: employee) -> boolean:
+  match
+    let $total in supervised_fte($e);
+    $total >= 2.0;
+  return check;
+```
+
+**Set membership**, written as a disjunction of equalities because the list
+form is rejected for an attribute variable:
+
+```typeql
+fun holds_qualifying_credential($e: employee) -> boolean:
+  match
+    credential_held (holder: $e, credential: $c);
+    $c has credential_level $l;
+    { $l == "bachelor"; } or { $l == "master"; } or
+      { $l == "doctorate"; } or { $l == "professional_license"; };
+  return check;                           # § 541.301(d)-(e)
+```
+
+### Why this matters beyond correctness
+
+Functions are evaluated on demand. There is no stored result, so there is
+nothing to invalidate. Change one rating or one salary and the next call
+reflects it, with no recompute step and no cache.
+
+And the thresholds live in the schema rather than in a program. Changing
+$684 is one `redefine` and every caller follows — the nightly job, an ad-hoc
+query, a dashboard. Compute it in your own code instead and the rule exists
+in two places, and one day they disagree.
+
+---
+
+## 4. The rulebook as a tree
+
+```
+exempt_from_overtime                      AND
+├── enterprise_covered                    db   0.3    § 203(s)(1)(A)(ii)
+├── not_categorically_nonexempt           db   0.4    § 541.3
+├── an_exemption_applies                  OR   2.0
+│   ├── outside_sales                     AND  7.1    § 541.500
+│   │   ├── os_regularly_offsite          db   1.1    § 541.502
+│   │   └── os_primary_duty_is_sales      MODEL 6.0   § 541.500(a)(1)
+│   ├── computer_employee                 AND  9.0    § 213(a)(17)
+│   │   ├── ce_occupation_qualifies       db   0.4    § 541.400(b)
+│   │   ├── ce_not_excluded_role          db   0.5    § 541.401
+│   │   ├── ce_compensation               OR   1.0
+│   │   │   ├── ce_hourly_threshold       db   0.8    $27.63/hr
+│   │   │   └── ce_salary_threshold       db   0.9    $684/wk
+│   │   └── ce_primary_duty_qualifies     MODEL 6.5   § 213(a)(17)(A)-(D)
+│   ├── executive                         AND  10.3   § 541.100
+│   │   ├── ex_salary_basis               db   0.7    § 541.602
+│   │   ├── ex_salary_threshold           db   0.8    § 541.600(a)
+│   │   ├── ex_directs_two_or_more        db   1.2    § 541.104
+│   │   ├── ex_hiring_influence           OR   2.0    § 541.100(a)(4)
+│   │   │   ├── ex_hire_fire_authority    db   0.6
+│   │   │   └── ex_recommendations_weighted MODEL 6.5 § 541.105
+│   │   └── ex_primary_duty_is_management MODEL 7.0   § 541.100(a)(2)
+│   ├── administrative                    AND  17.5   § 541.200
+│   │   ├── ad_salary_basis               db   0.7
+│   │   ├── ad_salary_threshold           db   0.8
+│   │   ├── ad_primarily_non_manual       db   1.0    § 541.200(a)(2)
+│   │   ├── ad_directly_related_to_mgmt   MODEL 7.0   § 541.201
+│   │   └── ad_discretion_and_judgement   MODEL 8.0   § 541.202
+│   └── professional                      AND  18.0   § 541.300
+│       ├── pr_salary_requirement         OR   1.2
+│       │   ├── pr_exempt_from_salary_test db  0.5    § 541.303-304
+│       │   └── pr_salary_met             AND  1.6
+│       │       ├── pr_salary_basis       db   0.7
+│       │       └── pr_salary_threshold   db   0.8
+│       └── pr_professional_duty          OR   2.0
+│           ├── pr_creative               AND  7.0
+│           │   ├── pr_creative_field     db   0.6    § 541.302(a)
+│           │   └── pr_invention_...      MODEL 7.0   § 541.302
+│           └── pr_learned                AND  8.5
+│               ├── pr_credential         db   0.9    § 541.301(d)-(e)
+│               ├── pr_advanced_knowledge MODEL 7.5   § 541.301(a)-(c)
+│               └── pr_consistent_discretion MODEL 8.0 § 541.301(b)
+└── duties_match_job_description          MODEL 7.0   § 541.2
+```
+
+**29 leaves. 19 database. 10 model. Depth 5.**
+
+Three structural features worth naming, because each one corresponds to
+something real in the regulation:
+
+**A nested OR where both sides are free.** A computer employee qualifies on
+*either* $27.63/hour *or* $684/week — § 213(a)(17) allows both, and both are
+stored numbers.
+
+**A nested OR where one side is 10× the other.** `ex_hiring_influence`:
+either you have hire/fire authority (a recorded boolean, cost 0.6) *or* your
+recommendations are "given particular weight" (§ 541.105, a judgement, cost
+6.5). The search should prefer the cheap side when it can.
+
+**Depth 5 under `professional`**, because the regulation really is that
+shaped. A teacher is exempt from the salary tests *entirely* under § 541.303
+— so the salary requirement is a disjunction, not a plain AND. Build it as
+an AND and a teacher earning $620 comes out wrong.
+
+Note also that the cost column is monotone in model-call count:
+`outside_sales` at 7.1 has one judgement, `professional` at 18.0 has three.
+That turns out to matter in section 8.
+
+---
+
+## 5. What goes to the model, and why
+
+All ten judgement goals send exactly two things: `job_title` and
+`job_description`. Nothing else.
+
+```
+os_primary_duty_is_sales                 § 541.500(a)(1)
+ce_primary_duty_qualifies                § 213(a)(17)(A)-(D)
+ex_recommendations_weighted              § 541.105
+ex_primary_duty_is_management            § 541.100(a)(2)
+ad_directly_related_to_management        § 541.201
+ad_discretion_and_independent_judgement  § 541.202
+pr_invention_imagination_originality     § 541.302
+pr_advanced_knowledge                    § 541.301(a)-(c)
+pr_consistent_discretion                 § 541.301(b)
+duties_match_job_description             § 541.2
+```
+
+### The dividing line, exactly
+
+| the database reads | the model reads |
 |---|---|
-| **split** | a question made of smaller questions becomes those questions |
-| **ask the database** | a yes/no function — free, exact |
-| **ask the model** | costs money, returns a probability |
+| a **number** — salary, FTE, duty share, revenue | **prose** |
+| a **boolean** somebody recorded | — |
+| a **classification** somebody assigned | — |
+| a **count or sum** over relations | — |
 
-**The order is the judgement.** Split, then the free answer, then the paid
-one. Reverse the last two and you pay a model to do arithmetic.
+Every one of the 19 resolves to comparing a stored value. Not one reads a
+sentence. And every one of the 10 is the same question in different forms:
+**what is this person actually doing?**
 
-The checklist is a tree, because the rule has "all of" and "either/or" parts:
+### The two hardest, which are the point
 
-```
-is this holding eligible?                 ALL of the below
-├── at least two analysts                 database
-├── clears the quality bar                EITHER of
-│   ├── Way A                               ALL of
-│   │   ├── average 4.0 or better          database
-│   │   └── analysts not split             database
-│   └── Way B                               ALL of
-│       ├── someone rated it 5             database
-│       └── at least three analysts        database
-└── description matches the industry       model
-```
+§ 541.201 and § 541.202 both sit in the administrative branch, and they are
+different questions about the same text:
 
-> A mistake found by running it: the first version put "analysts not split"
-> *outside* the either/or, as a fourth top-level requirement. That made Way B
-> unreachable — a 5 with a spread under 2 forces every rating to 4 or more,
-> so the average always clears 4.0 and Way A always wins first. Each way now
-> carries its own second condition.
+- **§ 541.201** — is the work *about running the business*, as distinct from
+  *producing what the business sells*? (The "administrative/production
+  dichotomy", the most litigated line in the whole regulation.)
+- **§ 541.202** — does the person *decide things of significance*, or follow
+  a procedure?
 
----
+A clerk following a documented filing procedure arguably passes the first
+and clearly fails the second. No formula separates them. So the model is
+asked one atomic question at a time rather than "is this person
+administrative".
 
-## 6. Two stocks, walked through
+### How the answer comes back
 
-Real logged output. Each numbered line is one thing that happened.
-
-### TSLA — refused, and the model is never consulted
-
-Rated 3, 2, 4. Average 3.00, nobody at 5.
+One number: the probability of yes.
 
 ```
-[01] search   SPLIT eligible [ALL]
-[02] search   TRY at least two analysts
-[03] TypeDB   meets_coverage_floor(TSLA)  → True
-[04] search   SETTLED at least two analysts
-[05] search   SPLIT quality bar [EITHER — cheapest way first]
-[06] search   SPLIT Way A [ALL]
-[07] search   TRY average 4.0 or better
-[08] TypeDB   meets_consensus_floor(TSLA) → False
-[09] search   FAILED average 4.0 or better      ← Way A is dead
-[10] search   SPLIT Way B [ALL]                 ← try the other way
-[11] search   TRY someone rated it 5
-[12] TypeDB   has_strong_conviction(TSLA) → False
-[13] search   FAILED someone rated it 5         ← Way B is dead too
-
-database queries   3     text fetched  none     model calls  0
-verdict            refused
+0.95  →  almost certainly yes
+0.50  →  no information
+0.03  →  almost certainly no
 ```
 
-**Three things never happened, and that is the result.**
-
-- *"Are the analysts split?"* never asked — Way A needed both halves and the
-  first failed.
-- *"At least three analysts?"* never asked, same reason in Way B.
-- *"Does the description match?"* never reached — so the description was
-  **never fetched** and the model was **never called**.
-
-The record shows the absences:
+Confidence is derived from the position rather than self-reported:
 
 ```
-at least two analysts : settled
-⊢ analysts not split            ← never asked
-⊢ Way B                         ← never asked
-⊢ description matches           ← never asked
+confidence = 2 × |p − 0.5|
 ```
 
-`⊢` means still open. Anyone reviewing this knows the verdict is not an
-opinion about TSLA's description, because that was never put to anything.
+That formula is not an invention — it is the vendor's own confidence
+statistic for a choice, specialised to two options. Their documentation
+confirms the premise too: a yes/no answer carries no confidence field,
+because for a binary question the probability *is* the uncertainty.
 
-### AAPL after a downgrade — the search finds the other way
-
-Maria Garcia cuts 4 → 1. Ratings 5, 4, 1; average 3.33. Steps [01]–[09]
-identical: two analysts ✓, Way A fails on the average. Then:
-
-```
-[10] search   SPLIT Way B [ALL]
-[12] TypeDB   has_strong_conviction(AAPL) → True    (Jane Doe's 5)
-[15] TypeDB   has_broad_coverage(AAPL)    → True    (three analysts)
-[16] search   SETTLED the quality bar — by the other way
-[17] search   TRY description matches — ask the model
-              needs: description, sector
-[18] TypeDB   description → 'Designs and sells consumer electronics…'
-[19] TypeDB   sector      → 'Technology'
-[20] model    asked
-[21] model    0.98
-[22] search   SETTLED description matches
-
-database queries  4 + 2 fetches    model calls  1    verdict  keep
-```
-
-Going back and trying the second way after the first fails is called
-**backtracking**. It sounds obvious written down; it is the thing most
-easily got wrong, because something has to *remember* there was a second way
-after the first already failed.
-
-Note the information is fetched at step 18, not at the start. Until the
-search reached that question there was no reason to pay for it. In the TSLA
-case it never happened.
-
----
-
-## 7. What the model is sent
-
-Not the policy, not the ratings, not what is already decided. Just the two
-facts this one question needs:
-
-```json
-{
-  "state": {
-    "description": "Designs and sells consumer electronics, software and services.",
-    "sector": "Technology"
-  },
-  "questions": {
-    "classification_consistent": {
-      "type": "noul",
-      "instructions": "Is the issuer's stated business consistent with the sector it is classified under? If the record contains no description of the business, you cannot tell."
-    }
-  }
-}
-```
-
-It replies with **one number**:
-
-```json
-{ "classification_consistent": { "noul": 0.98 } }
-```
-
-```
-0.98   almost certainly yes
-0.50   no idea at all
-0.03   almost certainly no
-```
-
-One number is enough because the uncertainty is in its *position*:
-
-```
-confidence = 2 × |number − 0.5|       0.98 → 0.96        0.50 → 0.00
-```
-
-That matters. Ask a model *"how confident are you?"* and it will say about
-0.9 whatever the truth — measured at 0.92–0.94 across cases including ones
-it got wrong. Here a 0.50 cannot pretend to be sure, because 0.50 **is** the
-uncertainty.
+It matters because self-reported confidence carries no signal. Measured on
+a general chat model across the same cases: mean **0.92 when right and 1.00
+when wrong** — a negative separation. A 0.50 here cannot pretend to be sure.
 
 ### Three outcomes, not two
 
 ```
-confident yes   →  the question is settled yes
-confident no    →  settled no; the search backtracks
-anything else   →  settled by assumption, and a GAP is recorded
+confident yes  (p > 0.5, confidence ≥ 0.6)  →  the test is satisfied
+confident no   (p < 0.5, confidence ≥ 0.6)  →  not satisfied; the search backtracks
+anything else                                →  recorded as a GAP
 ```
+
+The third row is the reason a model is here rather than a yes/no classifier.
+A binary gate must pick one, and both choices are wrong: call it *no* and
+you deny an exemption because a document was not uploaded; call it *yes* and
+you grant one nobody checked.
 
 ---
 
-## 8. The missing description
+## 6. The search
 
-TSLA has no description. With its ratings revised so the first two
-requirements pass, the search reaches the third and asks:
+Three tactics, tried in this order. **The order is the heuristic.**
 
-```json
-{ "state": { "description": "(nothing on file)", "sector": "Automotive" } }
-→ 0.50
-```
-
-*There is nothing here to compare; I cannot tell.* Correct.
-
-A plain yes/no system must pick one, and **both are wrong**:
-
-- Call it **no** → you sell a holding because a document was not uploaded.
-- Call it **yes** → you keep a holding nobody checked.
-
-So neither. The verdict is marked as **resting on a gap**:
+| tactic | effect |
+|---|---|
+| `split` | a compound test becomes its parts |
+| `schema-function` | ask the database — exact, free |
+| `ask-model` | ask the model — costs money, returns a probability |
 
 ```
-verdict         proved (modulo holes)
-safe to act on  False
-depends on an assumed question: description matches the industry
+prove(goal)
+  for each tactic in order:
+    if it does not apply: skip
+    snapshot the state
+    run it
+      ├─ produced subtests?  all must hold (AND) / any suffices (OR)
+      │     success → settle, discharge the siblings that became moot
+      │     failure → restore the snapshot, try the next tactic
+      ├─ satisfied          → settle
+      ├─ cannot tell        → settle AND record a gap
+      └─ not satisfied      → restore the snapshot, try the next tactic
 ```
 
-Requirements 1 and 2 genuinely passed. Requirement 3 was assumed, that is
-recorded everywhere the verdict is reported, it is not saved, and it goes to
-a person.
+**Within an AND, cheapest first, and the first failure decides.** That is
+why the expensive judgements usually never run: a branch that fails any
+cheap database test is abandoned before reaching them.
 
-A correction worth keeping: an earlier version of this document said the
-database *cannot express* "unknown". That was wrong. `not { $s has descr
-$d; }` finds the stock lacking one, and a function returning a list can come
-back empty for the undecided case. The real reason is §4 — **there is no
-formula for the question at all.**
+**Within an OR, the state is restored between attempts** — that restore *is*
+the backtracking.
+
+**And an OR prefers a clean close over a gappy one.** This was a defect
+found by running five different orderings and comparing them. Accepting the
+first branch that closed — including one that closed only by admitting a gap
+— meant an employee qualifying cleanly under Executive and
+only-modulo-a-gap under Administrative came back **exempt** or **needs
+review** according to which was tried first. Ordering was changing the
+answer. A gappy success is now held in reserve while the search looks for a
+clean route, and taken only if none exists.
 
 ---
 
-## 9. Why the database has the last word
+## 7. One determination, traced
 
-The part that works all this out **cannot save anything**. It returns a
-result, and two checks run.
-
-**Is the verdict resting on a gap?** If so it is not saved.
-
-**Does the database accept it?** The verdict field is declared as exactly
-three permitted words:
+The subject:
 
 ```
-[CNT8] Constraint '@values("include", "review", "reject")' has been
-       violated: value '"probably-fine"' does not match the set of values.
+job title       Senior Staff          ← establishes nothing (§ 541.2)
+weekly salary   $2,600
+supervises      3.0 full-time equivalents
+can hire/fire   true
+description     "Runs the regional distribution department. Sets its budget
+                 and staffing plan, interviews and hires its twelve
+                 employees, conducts their performance reviews and decides
+                 promotions and dismissals. Spends the working day directing
+                 the department rather than performing its work."
 ```
 
-`"probably-fine"` is not logged as a warning. **It cannot exist.**
-
-The database also refuses a rating of 7 (`@range(1..5)`), a verdict about no
-stock or two stocks (`@card(1)`), two verdicts sharing an identity
-(`@key`), and a verdict "based on" something that is not a rating. And on
-its own initiative:
+### The run
 
 ```
-[FRP7] Functions may not contain write stages.
+[01] split exempt_from_overtime [ALL must hold]
+[02] db    enterprise_is_covered($e)        = True
+[03] db    is_categorically_nonexempt($e)   = False  -> negated, goal is True
+[04] db    fetch job_title + job_description        (one read, cached)
+[05] MODEL which branch first?  → executive
+[07] split an_exemption_applies [ANY suffices]
+[08] split executive [ALL must hold]
+[09] db    paid_on_salary_basis($e)         = True
+[10] db    meets_salary_threshold($e)       = True    $2,600 ≥ $684
+[11] db    directs_two_or_more_fte($e)      = True    3.0 ≥ 2.0
+[12] MODEL which hiring route first? → ex_hire_fire_authority
+[15] db    has_hire_fire_authority($e)      = True
+[16] MODEL "is primary duty management?"    § 541.100(a)(2)
+              p=0.95  confidence=0.90  → satisfied
+[17] MODEL "do the duties match the title?" § 541.2
+              p=0.76  confidence=0.46  → below the bar, recorded as a GAP
 ```
-
-A function cannot insert or delete. **Reasoning cannot change the thing it
-is reasoning about.**
-
-This separation is what makes the rest safe. The search may try things in a
-poor order, go down dead ends, and be unsure — because it is not the
-component that decides what is true.
-
----
-
-## 10. Compared against language models
-
-93 test cases, correct answers worked out in advance from the rule itself.
 
 ### The result
 
-Nine arms. `n` is the number of cases that returned a parseable answer;
-transport and content-filter failures are excluded rather than counted as
-wrong.
-
-| | correct | n | reasoning tokens | cost |
-|---|---|---|---|---|
-| **this approach** | **100%** | 93 | **0** | **$0.0008** |
-| gpt-4o, answering directly | **72.6%** | 84 | 0 | $0.0707 |
-| llama-3.3-70b, step-by-step | 90.3% | 93 | 0 | $0.0057 |
-| gpt-4o-mini, step-by-step | 98.9% | 93 | 0 | $0.0214 |
-| gpt-4o, step-by-step | **100%** | 88 | 0 | $0.3213 |
-| claude-opus-5.5, direct | 100% | 93 | 7,099 | $0.3389 |
-| claude-opus-5.5, step-by-step | 100% | 92 | 9,150 | $0.9271 |
-| gpt-6.1-sol-pro, step-by-step | 100% | 93 | 6,811 | $0.5642 |
-| grok-4.7, step-by-step | 100% | 93 | 36,884 | $0.3367 |
-
-### Where the failures are
-
-Accuracy per stratum. The two columns that matter are `route_b_rescue` —
-route (a) fails and route (b) has to be tried — and `unknowable`, where the
-description is missing.
-
-| stratum | n | ours | gpt-4o direct | llama-3.3 | gpt-4o step | frontier (×4) |
-|---|---|---|---|---|---|---|
-| `route_b_rescue` | 12 | 100% | **33%** | 75% | 100% | 100% |
-| `unknowable` | 19 | 100% | **24%** | 84% | 100% | 100% |
-| `route_a_pass` | 7 | 100% | 71% | 86% | 100% | 100% |
-| `breadth_fail` | 5 | 100% | 100% | 60% | 100% | 100% |
-| `both_routes_fail` | 31 | 100% | 93% | 100% | 100% | 100% |
-| `judgement_no` | 19 | 100% | 100% | 100% | 100% | 100% |
-
-gpt-4o answering directly fails **exactly where the structure predicts**: it
-gets two of three backtracking cases wrong, and on missing evidence it
-rejects 13 of 19 holdings — naming the clause it had no evidence for, then
-treating absence as failure.
-
-### The finding: the search is the capability, not the model
-
-Read the table by what each arm *does*, not by how new it is:
-
-| how the search happens | accuracy |
-|---|---|
-| not at all — answer directly | 72.6% |
-| written out in the model's own output | **100%** |
-| internally, as reasoning tokens | **100%** |
-| externally, as database calls | **100%** |
-
-**The same model that scores 72.6% answering directly scores 100% when told
-to work through the clauses.** Nothing about its weights changed. Forcing
-the search into the output is what fixed it.
-
-So the failure mode is real, and it attaches to *not doing the search* —
-not to being a language model. Recent models do it internally by default,
-which is why they need no instruction. Older ones need to be told. And this
-approach does it in the open.
-
-### Self-reported confidence is not a signal
-
-Mean stated confidence when right versus when wrong:
-
 ```
-gpt-4o direct        right 0.96   wrong 0.91    separation +0.05
-llama-3.3-70b        right 0.87   wrong 0.78    separation +0.09
-gpt-4o-mini          right 0.92   wrong 1.00    separation −0.08
+verdict            needs human review
+safe to act on     False
+database queries   6 formula checks + 1 evidence read
+model requests     2 proposals + 2 judgements
+cost               $0.000091
 ```
 
-gpt-4o-mini is *more* confident when it is wrong. A number a model reports
-about itself does not separate its right answers from its wrong ones.
-Contrast the decision model on the one question it is asked: 0.97–0.98 with
-a description present, 0.50 with none.
+Four things in that trace are the whole design working:
 
-### What is left is compute
+**Six of eight decisions never touched a model.** The salary, the FTE count,
+the hire/fire flag, the revenue floor and the categorical bar are all exact.
 
-Four frontier models match this approach on accuracy and on stability — all
-of them returned identical verdicts across three repeats of the 31 hardest
-cases. An earlier version of this document claimed they would fail at
-backtracking and missing evidence. Against *current* models that is false,
-and the claim is withdrawn rather than quietly edited out.
+**Four of five exemptions were never examined.** The branch proposal put
+Executive first and it closed, so Administrative, Outside Sales, Computer
+and Professional — carrying 7 judgements between them — were never entered.
 
-What remains is **57 model calls instead of 93**, because thirty-six cases
-were settled by arithmetic and never reached a model, and **zero
-deliberation tokens** against 6,811 to 36,884 — a 400× to 1,150× cost
-difference for the same answers.
+**At the nested hiring choice the model chose the database route.** § 541.105
+"particular weight" is a judgement; hire/fire authority is a stored boolean.
+It picked the boolean, costing a `True` instead of a model call.
 
-At a thousand holdings nightly: roughly $3.60 with the cheapest frontier
-model, $10 with the step-by-step one, or under a penny here.
+**The last judgement produced a gap, and the gap changed the verdict.**
+`0.76` with confidence `0.46` is a lean, not a finding — reasonably, since
+the title is "Senior Staff" and there is little to match duties against. So
+the determination comes back *needs human review* rather than *exempt*, and
+says exactly which clause a human must settle.
 
 ---
 
-## 11. Common confusions
+## 8. Measurements
 
-**Is the model deciding anything important?** One of six questions. It
-changes the verdict only where a description is missing. Narrow by design.
+### Remove the model, and nothing can be cleared
 
-**Why not put all the rules in the database and drop the model?** You can,
-for five of six. The sixth has no formula — §4.
+25 employees, run twice — once with the decision model, once with it gone.
 
-**Why not ask a model everything?** On accuracy you could. It costs
-400–1,150× more, you cannot see which ratings an answer used, and nothing
-stops it returning a verdict outside the three permitted words.
+```
+                 exempt   needs review   not exempt
+with the model      14          6              5
+without it           0         22              3
+```
 
-**Isn't the record just logging?** Logging is written alongside the work.
-This record *is* the work — appended to as each step runs, and nothing can
-be in the verdict that is not in it.
+**Zero exempt determinations without it.** Every exemption branch ends in a
+judgement, so *exempt* is unreachable. The database alone gets you to
+"everything measurable checks out, and I cannot tell whether they qualify".
 
-**Why keep failed steps?** The way not taken is part of the reasoning. A
-record showing only what worked is a story written after the answer.
+The three that survive are all **negative** — § 541.3 barring a line
+operative and a paramedic, § 203(s) failing a small employer. A type system
+can rule people **out** by itself. It cannot rule anyone **in**.
 
-**What if the database is wrong?** Then the verdict is wrong — and the
-record shows exactly which ratings it relied on, so you can tell. That is
-why they are attached.
+Two also go the *wrong* way without it: a filing clerk and a help-desk
+technician are correctly **not exempt** with the model (failing § 541.202
+and § 541.401 respectively) and become "ask a human" without it.
+
+### Cost at scale
+
+```
+1,000 employees → ~2,667 judgements → $0.042
+```
+
+Four cents, for determinations that have no formula and that a person would
+otherwise make one at a time.
+
+### Should the model also choose the branch?
+
+It was built and measured. Fifteen employees constructed so that three
+branches stay live for every one — all salaried at $2,600, non-manual,
+supervising 3 FTE, credentialed, with identical titles. Only the description
+differs. Metric: judgement tests reached.
+
+```
+ordering                        judgements   vs cost   proposals
+perfect (ceiling)                    40        −15         0
+model, shown the description         40        −15        30
+model, branch labels only            51         −4        26
+random                               50         −5         0
+cost annotation (the default)         55          —         0
+worst possible                        60         +5         0
+```
+
+**It chooses perfectly — 15 of 15 — and still should not do it.**
+
+A proposal sends 735 input tokens; a judgement sends 375. So one proposal
+must avoid **1.96** judgements to break even. Measured, it avoided **0.5**.
+Four times short, at any scale.
+
+The reason is the architecture working as intended: the cheap database tests
+run first inside every branch, so **a wrong branch is already cheap to
+discover**. The thing a proposer exists to avoid has been made inexpensive by
+the type system.
+
+Two further results from that table, both of which correct earlier
+assumptions:
+
+**Shown only branch labels, the model scored like random** (51 vs 50). A
+proposer denied the evidence its branches turn on is guessing. It needs the
+job description — which is now derived automatically from the branches' own
+declarations of what they require, rather than configured.
+
+**The cost annotation is fragile.** On an earlier fixture it was nearly
+optimal (58 against a perfect 55). Here it is **second worst**, beaten by
+random. Sorting by cost only works while cost predicts which branch wins;
+once it does not, it is worse than chance.
 
 ---
 
-## Glossary
+## 9. How a reviewer gets evidence
 
-| term | meaning |
-|---|---|
-| **function** | a formula stored in the database, worked out fresh each time. Never stale, because never stored. |
-| **relation** | a record joining things together that can carry its own data — `coverage` joins an analyst to a stock and carries the rating. |
-| **`@card(1)`** | "exactly one of these" — a constraint the database enforces. |
-| **`@values(...)`** | "only these exact values are permitted". |
-| **goal** | one question that must be settled. |
-| **tactic** | a way of trying to settle one: split it, ask the database, ask the model. |
-| **ALL / EITHER** | every part must hold / any one part suffices. |
-| **backtracking** | after one route fails, undoing it and trying the next. |
-| **short-circuiting** | not asking a question whose answer cannot change the outcome. |
-| **ledger** | the running record: settled, still open, assumed. |
-| **`⊢`** | "still to be settled". |
-| **gap** | a question closed by assumption because nobody could tell. |
-| **noul** | a yes/no question whose answer is one number: the probability of yes. |
-| **reasoning tokens** | a model's internal deliberation before it answers. Recent models have them; older ones do not. |
+A determination is only auditable if someone who was not there can
+reconstruct it from the **database**, with the process long exited. So it is
+stored as a relation that links what it relied on as role players:
+
+```typeql
+relation determination,
+    relates about @card(1),           # the employee
+    relates relied_on @card(0..),     # every test that was settled
+    relates admitted @card(0..),      # the ones nobody could settle
+    owns verdict @card(1),
+    owns decided_at @card(1),
+    owns full_trace @card(1);
+```
+
+Each test becomes a finding carrying its name, whether it held, **how** it
+was settled, its authority, and — if a model answered — the probability and
+confidence.
+
+Four questions, each answered by a query:
+
+**What was decided?**
+```
+Contested executive 0  (Senior Staff)
+verdict: needs_human_review     decided 2026-10-12 by typedb+decision-model
+```
+
+**On what basis?**
+```
+test                             held        settled by   authority
+enterprise_covered               True   schema-function   § 203(s)
+not_categorically_nonexempt      True   schema-function   § 541.3
+ex_salary_basis                  True   schema-function   § 541.602
+ex_salary_threshold              True   schema-function   § 541.600(a)
+ex_directs_two_or_more           True   schema-function   § 541.104
+ex_hire_fire_authority           True   schema-function   § 541.100(a)(4)
+ex_primary_duty_is_management    True         ask-model    § 541.100(a)(2)
+```
+
+The middle column is the point: six were computed from stored data, one was
+a model reading prose. Those warrant different scrutiny and the record says
+which is which.
+
+**What could nobody settle?**
+```
+duties_match_job_description   [§ 541.2]
+   answered 0.76 at confidence 0.52, below the bar
+   ADMITTED, not decided — a human must settle it
+```
+
+Stored in a **separate role**, so "find every determination resting on an
+assumption" is one query rather than a log search.
+
+**How sure was the model?**
+```
+duties_match_job_description     p=0.76   confidence=0.52
+ex_primary_duty_is_management    p=0.95   confidence=0.90
+```
+
+### Links, not copies
+
+The record does not store "salary was $2,600". It links the findings, and
+the queries read the salary off the employee. A copied number would quietly
+disagree with reality after a correction; a link can be re-read and checked.
+
+### Three gaps, stated
+
+**A finding does not name the row it read.** `ex_salary_threshold: True` is
+recorded without "because weekly_salary was 2600 when I looked". Edit the
+salary later and nothing flags the drift.
+
+**Re-running does not link to the prior determination.** It should attach via
+a supersession morphism rather than sitting alongside. The machinery exists;
+it is not wired in here.
+
+**The reviewer's own answer is not captured.** A human settles § 541.2 and
+that should become a finding marked `settled_how: "human"`, closing the gap.
+Nothing writes it back yet.

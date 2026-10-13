@@ -1,300 +1,319 @@
-# TypeDB schema additions: provenance types and derived reasoning
+# FLSA white-collar overtime exemption — the complete schema
 #
-# The base model is TypeDB's published "agentic-finance" example (securities,
-# analysts, coverage relations, price bars, indices). It is used unmodified;
-# everything below is a pure `define`, so applying it leaves the original
-# model intact and its four shipped functions keep returning the same answers.
+# 29 USC § 213(a) exempts executive, administrative, professional, computer
+# and outside-sales employees from overtime. 29 CFR Part 541 defines what
+# each of those means. The structure is a five-way disjunction: an employee
+# needs to satisfy only one category.
 #
-# Two things are added.
+# What makes it a useful subject is the split inside it. Of the 29 tests in
+# the rulebook, 19 are thresholds or lookups over stored values and a
+# function settles them exactly. The other 10 have no closed form at all --
+# "primary duty is management" (§ 541.100(a)(2)), "exercises discretion and
+# independent judgment" (§ 541.202) -- and no function can be written for
+# them, because § 541.2 is explicit that a job title establishes nothing and
+# actual duties control. Duties are prose.
 #
-#   1. PROVENANCE. The base schema has none. `market_cap` is correct the
-#      instant it is asked, but an agent that *reports* a figure leaves no
-#      record of which price bar it used. The types below make an asserted
-#      value carry its own inputs as role players, so a claim cannot drift
-#      from its evidence.
+# Two design choices are worth noticing before reading on.
 #
-#   2. DERIVED REASONING. Fourteen functions answering questions the shipped
-#      four cannot: how far apart the analysts are, whether a name is
-#      contested, what share of an index one holding accounts for, and the
-#      policy thresholds themselves.
+#   `job_description @card(0..1)` -- a missing description is schema-legal.
+#   That is deliberate: with nothing on file the duty tests cannot be settled
+#   either way, and a verdict must come back resting on a gap rather than
+#   guessing.
 #
-# Functions are defined in a separate block from the types so that a function
-# that fails to define cannot take the type schema down with it.
+#   Regulatory classifications live in DATA, on an `occupation` entity with a
+#   multi-valued `classification`. So moving an occupation in or out of
+#   § 541.3's categorical bar is a write, not a code change and not a schema
+#   migration.
+#
+# Thresholds are the 2019 rule: $684/week (§ 541.600(a)) and $27.63/hour for
+# computer employees (§ 213(a)(17)).
 
 define
 
-# ── provenance attributes ────────────────────────────────────────────
-attribute claim_id, value string;
-attribute claim_kind, value string
-    @values("market_cap", "consensus_rating", "price_change", "index_weight",
-            "rating_dispersion", "portfolio_eligibility");
-attribute claim_value, value double;
-attribute asserted_at, value datetime;
-attribute asserted_by, value string;      # which agent or analyst asserted it
-attribute source_kind, value string
-    @values("computed", "analyst_asserted", "vendor_feed", "expert_curated");
-attribute confidence, value double @range(0.0..1.0);
-attribute rationale, value string;
-attribute is_current, value boolean;
+# ── attributes ───────────────────────────────────────────────────────
+attribute emp_id, value string;
+attribute name, value string;
+attribute job_title, value string;
+# 0..1 is load-bearing: a missing description is schema-legal, and is what
+# produces a verdict that rests on a gap.
+attribute job_description, value string;
+attribute occupation_code, value string;
+attribute classification, value string
+    @values("categorically_nonexempt", "computer_occupation",
+            "excluded_computer_role", "salary_test_exempt", "creative_field");
+attribute annual_gross_volume, value double;
+attribute fte, value double @range(0.0..1.0);
+attribute hire_fire_authority, value boolean;
+attribute recommendations_weighted, value boolean;
+attribute weekly_salary, value double;
+attribute hourly_rate, value double;
+attribute salary_guaranteed, value boolean;
+attribute duty_kind, value string
+    @values("management", "office_nonmanual", "manual", "systems_analysis",
+            "software_design", "os_programming", "making_sales",
+            "advanced_knowledge", "creative", "routine_clerical",
+            "help_desk", "hardware_repair", "teaching", "practice_of_law");
+attribute duty_share, value double @range(0.0..1.0);
+attribute offsite_days_per_week, value double @range(0.0..7.0);
+attribute credential_level, value string
+    @values("none", "associate", "bachelor", "master", "doctorate",
+            "professional_license");
+attribute credential_field, value string;
 
-# A decision, as distinct from a measurement. `claim_value` is a double and
-# cannot hold "reject"; an eligibility verdict needs its own attribute, and
-# the prong trace that produced it needs to travel with it or the verdict is
-# unauditable.
-attribute decision, value string
-    @values("include", "review", "reject");
-attribute prong_trace, value string;
+# ── entities ─────────────────────────────────────────────────────────
+entity employer,
+    owns name @key,
+    owns annual_gross_volume @card(1),
+    plays employment:employer;
 
-# ── the derived claim ────────────────────────────────────────────────
-# An n-ary relation: the claim, what it is about, and every input it was
-# computed from, in one atomic record. The inputs are role players rather
-# than copied values, so the claim cannot drift from its evidence.
-relation derived_claim,
-    relates about @card(1),                    # the security the claim concerns
-    relates from_price @card(0..),             # price bars that fed it
-    relates from_coverage @card(0..),          # coverage relations that fed it
-    relates within @card(0..1),                # an index, for weight claims
-    owns claim_id @key,
-    owns claim_kind,
-    owns claim_value,
-    owns asserted_at,
-    owns asserted_by,
-    owns source_kind,
-    owns confidence,
-    owns rationale,
-    owns is_current,
-    owns decision,
-    owns prong_trace;
+entity employee,
+    owns emp_id @key,
+    owns name @card(1),
+    owns job_title @card(1),
+    owns job_description @card(0..1),
+    owns hire_fire_authority @card(0..1),
+    owns recommendations_weighted @card(0..1),
+    owns weekly_salary @card(0..1),
+    owns hourly_rate @card(0..1),
+    owns salary_guaranteed @card(0..1),
+    owns offsite_days_per_week @card(0..1),
+    plays employment:employee,
+    plays holds_occupation:worker,
+    plays supervision:supervisor,
+    plays duty_allocation:performer,
+    plays credential_held:holder;
 
-security plays derived_claim:about @card(0..);
-price_bar plays derived_claim:from_price @card(0..);
-index plays derived_claim:within @card(0..);
+# The regulatory classification table — a reference entity, not an
+# or-chain inside a function body.
+entity occupation,
+    owns occupation_code @key,
+    owns name @card(1),
+    owns classification @card(0..),
+    plays holds_occupation:occupation;
 
-# A coverage relation playing a role in another relation: this is what lets
-# a consensus claim point at the individual ratings it averaged, the same
-# way the IAM example has `access` play `permitted-access`.
-coverage plays derived_claim:from_coverage @card(0..);
+entity duty,
+    owns duty_kind @card(1),
+    owns duty_share @card(1),
+    plays duty_allocation:duty;
 
-# ── morphisms: relations between claims ──────────────────────────────
-relation claim_morphism @abstract,
-    relates earlier @card(1..),
-    relates later @card(1..),
-    owns claim_id @key,
-    owns rationale,
-    owns asserted_at,
-    owns asserted_by;
+entity credential,
+    owns credential_level @card(1),
+    owns credential_field @card(1),
+    plays credential_held:credential;
 
-# A restatement: the same claim recomputed on fresher inputs. The old one
-# is kept, so "what did we say on Tuesday, and why" stays answerable.
-relation supersedes_claim, sub claim_morphism;
+entity supervised_post,
+    owns name @key,
+    owns fte @card(1),
+    plays supervision:supervised;
 
-# Two claims that cannot both stand — e.g. two vendors disagreeing.
-relation contradicts_claim, sub claim_morphism;
+# ── relations ────────────────────────────────────────────────────────
+relation employment,
+    relates employer @card(1),
+    relates employee @card(1);
 
-derived_claim plays claim_morphism:earlier @card(0..);
-derived_claim plays claim_morphism:later @card(0..);
-# Self-referential, so a morphism can relate morphisms to any depth.
-claim_morphism plays claim_morphism:earlier @card(0..);
-claim_morphism plays claim_morphism:later @card(0..);
+relation holds_occupation,
+    relates worker @card(1),
+    relates occupation @card(1);
 
-# ════════════════════════════════════════════════════════════════════
-# FUNCTIONS
-# ════════════════════════════════════════════════════════════════════
+# n-ary: one relation carries the whole supervised span, not one edge each.
+relation supervision,
+    relates supervisor @card(1),
+    relates supervised @card(1..);
 
-define
+relation duty_allocation,
+    relates performer @card(1),
+    relates duty @card(1..);
 
-# How far apart the analysts are. Dispersion, not consensus: a mean of 3
-# hides the difference between everyone saying 3 and a 1-vs-5 split.
-fun rating_spread($s: security) -> integer:
-  match
-    $cov isa coverage, links (covered: $s), has rating $r;
-  reduce $hi = max($r), $lo = min($r);
-  match
-    let $spread = $hi - $lo;
-  return first $spread;
+relation credential_held,
+    relates holder @card(1),
+    relates credential @card(1);
 
-# Contested = the analysts materially disagree. A boolean the agent can
-# branch on, rather than a number it has to threshold itself.
-fun is_contested($s: security) -> boolean:
-  match
-    let $spread in rating_spread($s);
-    $spread >= 2;
-  return check;
+employee plays employment:employee @card(1);
+employer plays employment:employer @card(0..);
 
-# How many distinct analysts cover a name. Breadth, which consensus alone
-# does not tell you: one 5 and ten 5s are the same mean.
-fun coverage_breadth($s: security) -> integer:
-  match
-    $cov isa coverage, links (covered: $s, analyst: $a);
-  select $a;
-  distinct;
-  return count;
+# ── the determination, and its evidence ──────────────────────────────
+#
+# A verdict is only auditable if a reviewer can reconstruct it from the
+# database alone, days later, without the run log. So the determination
+# links what it relied on as ROLE PLAYERS rather than copying values: the
+# employee, the exemption category it closed under, each prong that was
+# settled, and each question that had to be admitted.
+#
+# 29 CFR 541.2 is the reason the admitted ones are recorded as first-class
+# rather than omitted: a determination that rests on an unverified duty
+# description is a different thing from one that does not, and the record
+# has to say which.
 
-# Total market cap of an index's constituents.
-fun index_market_cap($i: index) -> double:
-  match
-    index_membership (basket: $i, constituent: $s);
-    $s isa equity;
-    let $each in market_cap($s);
-  reduce $total = sum($each);
-  return first $total;
+attribute determination_id, value string;
+attribute verdict, value string
+    @values("exempt", "nonexempt", "needs_human_review");
+attribute decided_at, value datetime;
+attribute decided_by, value string;
+attribute settled_how, value string
+    @values("schema-function", "ask-model", "split", "admitted");
+attribute prong_name, value string;
+attribute prong_citation, value string;
+attribute prong_held, value boolean;
+attribute model_probability, value double @range(0.0..1.0);
+attribute model_confidence, value double @range(0.0..1.0);
+attribute step_order, value integer;
+attribute full_trace, value string;
 
-# Market cap of a security as a share of its index's total. Composed over
-# index_market_cap, which composes over their market_cap, which composes
-# over their latest_price — reasoning stacked on their functions rather
-# than replacing them.
-fun index_weight($s: equity, $i: index) -> double:
-  match
-    index_membership (basket: $i, constituent: $s);
-    let $mine in market_cap($s);
-    let $total in index_market_cap($i);
-    let $weight = $mine / $total;
-  return first $weight;
+# One prong, as it was actually settled on this run.
+entity prong_finding,
+    owns prong_name @card(1),
+    owns prong_citation @card(0..1),
+    owns prong_held @card(1),
+    owns settled_how @card(1),
+    owns model_probability @card(0..1),
+    owns model_confidence @card(0..1),
+    owns step_order @card(1),
+    plays determination:relied_on,
+    plays determination:admitted;
 
-# Constituents nobody covers — a gap in the research, which is the kind of
-# question a terminal should be able to answer and theirs cannot.
-fun uncovered_constituents($i: index) -> { equity }:
-  match
-    index_membership (basket: $i, constituent: $s);
-    $s isa equity;
-    not { $cov isa coverage, links (covered: $s); };
-  return { $s };
+relation determination,
+    relates about @card(1),              # the employee
+    relates relied_on @card(0..),        # every prong that was settled
+    relates admitted @card(0..),         # the ones nobody could settle
+    owns determination_id @key,
+    owns verdict @card(1),
+    owns decided_at @card(1),
+    owns decided_by @card(1),
+    owns full_trace @card(1);
 
-# Securities on more than one venue.
-fun venue_count($s: security) -> integer:
-  match
-    listing (listed: $s, venue: $v);
-  select $v;
-  distinct;
-  return count;
-
-# ── provenance-aware reads ───────────────────────────────────────────
-
-# The claims that still stand for a security: asserted, not superseded.
-fun current_claims($s: security) -> { derived_claim }:
-  match
-    $c isa derived_claim, links (about: $s), has is_current true;
-    not { supersedes_claim (earlier: $c); };
-  return { $c };
-
-# Everything a claim was computed from. This is the question their schema
-# cannot answer at all: not "what is the market cap" but "what was the
-# market cap we reported, and off which price".
-fun claim_inputs($c: derived_claim) -> { price_bar }:
-  match
-    $c isa derived_claim, links (from_price: $b);
-  return { $b };
-
-# The portfolio gate, as the schema states it. Three prongs, conjunctive:
-# covered by at least two analysts, consensus at least 4, and not contested.
-# Jev evaluates each prong against state assembled from these functions —
-# the schema says WHAT the test is, Jev says whether it holds.
-fun meets_coverage_floor($s: security) -> boolean:
-  match
-    let $n in coverage_breadth($s);
-    $n >= 2;
-  return check;
-
-fun meets_consensus_floor($s: security) -> boolean:
-  match
-    let $r in consensus_rating($s);
-    $r >= 4.0;
-  return check;
-
-# Decisions that still stand for a security.
-fun current_decision($s: security) -> { derived_claim }:
-  match
-    $c isa derived_claim, links (about: $s),
-      has claim_kind "portfolio_eligibility", has is_current true;
-    not { supersedes_claim (earlier: $c); };
-  return { $c };
-
-# ── the second disjunct of IPS 2.2 ───────────────────────────────────
-
-# At least one analyst with top conviction. This exists so the eligibility
-# test has a genuine disjunction: a name can clear IPS 2.2 either on the
-# mean or on a single strong call. The search tries the mean first because
-# it is the cheaper read, and falls back to this one — which is where
-# backtracking stops being decoration.
-fun has_strong_conviction($s: security) -> boolean:
-  match
-    $cov isa coverage, links (covered: $s), has rating 5;
-  return check;
-
-# Covered by at least three analysts. The second disjunct of IPS 2.2 needs
-# a breadth floor of its own: a single top call should only carry a holding
-# when enough houses are looking at it.
-fun has_broad_coverage($s: security) -> boolean:
-  match
-    let $n in coverage_breadth($s);
-    $n >= 3;
-  return check;
+employee plays determination:about @card(0..);
 
 # ════════════════════════════════════════════════════════════════════
-# MANDATE SLEEVE PREDICATES
-# (see PROPOSER.md — the five-way disjunction these support)
+# THE 19 TESTS A FUNCTION CAN SETTLE
 # ════════════════════════════════════════════════════════════════════
 
 define
 
-# ── momentum ─────────────────────────────────────────────────────────
-# Is the most recent bar above the one before it? Two reads of the same
-# price series, so it composes over their `latest_price` rather than
-# duplicating the sort.
-fun previous_price($s: security) -> double:
+# ── enterprise coverage, 29 USC § 203(s)(1)(A)(ii) ───────────────────
+fun enterprise_is_covered($e: employee) -> boolean:
   match
-    pricing (instrument: $s, bar: $b);
-    $b has price $p, has as_of $t;
-    let $px = $p;
-  sort $t desc;
-  offset 1;
-  return first $px;
-
-fun price_is_rising($s: security) -> boolean:
-  match
-    let $now in latest_price($s);
-    let $before in previous_price($s);
-    $now > $before;
+    employment (employer: $r, employee: $e);
+    $r has annual_gross_volume $v;
+    $v >= 500000.0;
   return check;
 
-# ── size ─────────────────────────────────────────────────────────────
-fun is_small_cap($e: equity) -> boolean:
+# ── categorical bars, 29 CFR § 541.3 ────────────────────────────────
+fun is_categorically_nonexempt($e: employee) -> boolean:
   match
-    let $m in market_cap($e);
-    $m < 150000000000.0;
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "categorically_nonexempt";
   return check;
 
-fun is_mega_cap($e: equity) -> boolean:
+# ── salary tests, § 541.600(a) and § 541.602(a) ──────────────────────
+fun meets_salary_threshold($e: employee) -> boolean:
   match
-    let $m in market_cap($e);
-    $m >= 1000000000000.0;
+    $e has weekly_salary $s;
+    $s >= 684.0;
   return check;
 
-# ── index standing ───────────────────────────────────────────────────
-fun in_tracked_index($s: security) -> boolean:
+fun paid_on_salary_basis($e: employee) -> boolean:
   match
-    $i isa index, has name "Nasdaq 100";
-    index_membership (basket: $i, constituent: $s);
+    $e has salary_guaranteed true;
   return check;
 
-fun is_index_heavyweight($e: equity) -> boolean:
+# ── computer employees, 29 USC § 213(a)(17), § 541.400(b), § 541.401 ─
+fun in_computer_occupation($e: employee) -> boolean:
   match
-    $i isa index, has name "Nasdaq 100";
-    let $w in index_weight($e, $i);
-    $w >= 0.10;
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "computer_occupation";
   return check;
 
-# ── distribution of opinion ──────────────────────────────────────────
-fun has_no_bears($s: security) -> boolean:
+fun in_excluded_computer_role($e: employee) -> boolean:
   match
-    not { $cov isa coverage, links (covered: $s), has rating 1; };
-    not { $cov2 isa coverage, links (covered: $s), has rating 2; };
-    $any isa coverage, links (covered: $s);
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "excluded_computer_role";
   return check;
 
-# ── listing breadth ──────────────────────────────────────────────────
-fun is_cross_listed($s: security) -> boolean:
+fun meets_computer_hourly_rate($e: employee) -> boolean:
   match
-    let $v in venue_count($s);
-    $v >= 2;
+    $e has hourly_rate $h;
+    $h >= 27.63;
+  return check;
+
+# ── executive, § 541.100(a)(3) and § 541.104 ─────────────────────────
+# The unit § 541.104 counts in is full-time equivalents, not heads.
+fun supervised_fte($e: employee) -> double:
+  match
+    supervision (supervisor: $e, supervised: $p);
+    $p has fte $f;
+  return sum($f);
+
+fun directs_two_or_more_fte($e: employee) -> boolean:
+  match
+    let $total in supervised_fte($e);
+    $total >= 2.0;
+  return check;
+
+fun has_hire_fire_authority($e: employee) -> boolean:
+  match
+    $e has hire_fire_authority true;
+  return check;
+
+fun recommendations_are_weighted($e: employee) -> boolean:
+  match
+    $e has recommendations_weighted true;
+  return check;
+
+# ── duty shares, § 541.700 ───────────────────────────────────────────
+# Written for the one kind it is asked about rather than parameterised.
+# A `string` parameter cannot bind an attribute — `$d has duty_kind $kind`
+# declares $kind as both a Value and an Attribute:
+#   [REP35] The variable 'kind' cannot be declared as both a 'Value' and
+#           as an 'Attribute'
+# and a generic version nothing else calls is not worth the workaround.
+fun manual_share($e: employee) -> double:
+  match
+    duty_allocation (performer: $e, duty: $d);
+    $d has duty_kind "manual", has duty_share $s;
+  return sum($s);
+
+fun primarily_non_manual($e: employee) -> boolean:
+  match
+    let $m in manual_share($e);
+    $m < 0.5;
+  return check;
+
+# ── outside sales, § 541.500(a)(2) and § 541.502 ─────────────────────
+fun customarily_works_offsite($e: employee) -> boolean:
+  match
+    $e has offsite_days_per_week $d;
+    $d >= 2.0;
+  return check;
+
+# ── professional, § 541.301(d), § 541.302(a), § 541.303-304 ──────────
+fun in_salary_exempt_profession($e: employee) -> boolean:
+  match
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "salary_test_exempt";
+  return check;
+
+fun in_recognized_creative_field($e: employee) -> boolean:
+  match
+    holds_occupation (worker: $e, occupation: $o);
+    $o has classification "creative_field";
+  return check;
+
+# A disjunction of equalities rather than `$l in [...]`: the list form is
+# not accepted for an attribute variable here.
+fun holds_qualifying_credential($e: employee) -> boolean:
+  match
+    credential_held (holder: $e, credential: $c);
+    $c has credential_level $l;
+    { $l == "bachelor"; } or { $l == "master"; } or
+      { $l == "doctorate"; } or { $l == "professional_license"; };
+  return check;
+
+# ── has a filed description at all, § 541.2 ─────────────────────────
+# Not a test of exempt status — a test of whether the duty judgement can
+# be made. 29 CFR § 541.2 is explicit that a title does not establish
+# exempt status and actual duties control, so with no description on file
+# the duty prongs cannot be settled either way.
+fun has_job_description($e: employee) -> boolean:
+  match
+    $e has job_description $d;
   return check;

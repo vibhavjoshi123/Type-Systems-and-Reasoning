@@ -1,78 +1,96 @@
 # Type Systems and Reasoning
 
-## The shape of it
+Applying a written rulebook to data, with a **type system deciding every
+test that has a closed form** and a decision model asked only the questions
+no formula can answer.
+
+The subject is the US white-collar overtime exemption — 29 USC § 213(a) and
+29 CFR Part 541. An employee is exempt if they satisfy any one of five
+categories: Executive, Administrative, Professional, Computer, or Outside
+Sales.
+
+## The split that organises everything
+
+The rulebook has 29 testable parts. Ask one question of each — *could I
+write a formula for this?*
+
+**19 of them: yes.**
 
 ```
-the rule          a tree of obligations, declared as data
-                  ↓
-the procedure     tactics: split a goal, ask the database, ask the model
-                  ↓           ↓
-the database      exact answers        the model     judgements
-(5 of 6 goals)    free, no variance    (1 of 6)      one number, calibrated
-                  ↓
-the judge         the database again — the procedure cannot store anything
+is the salary at least $684 a week?                § 541.600(a)
+is the hourly rate at least $27.63?                § 213(a)(17)
+does this person direct 2+ full-time equivalents?  § 541.104
+is this occupation categorically barred?           § 541.3
+does this person hold a qualifying credential?     § 541.301(d)
 ```
 
-## The case: portfolio eligibility
+Numbers and lookups. TypeDB functions settle them exactly, for free, with no
+variance.
 
-A fund holds equities. Its investment policy says which may stay, and
-something has to re-check every holding nightly — analysts revise ratings,
-coverage starts and stops, filings arrive late. A holding that qualified
-yesterday may not today, and nobody notices unless something checks.
+**10 of them: no.**
 
-The policy has six testable parts. Asking one question of each — *could I
-write a formula for this?* — splits them cleanly:
+```
+is this person's primary duty MANAGEMENT?                 § 541.100(a)(2)
+does this person exercise DISCRETION AND INDEPENDENT
+   JUDGMENT on matters of significance?                   § 541.202
+is the work DIRECTLY RELATED to management or general
+   business operations?                                   § 541.201
+does the work require INVENTION, IMAGINATION, ORIGINALITY? § 541.302
+are this person's recommendations GIVEN PARTICULAR WEIGHT?  § 541.105
+```
 
-- **Five are arithmetic.** Count the analysts, average the ratings, measure
-  the spread. TypeDB functions answer these exactly, for free, with no
-  variance.
-- **One is a reading of English**: does a company's stated business match
-  its filed sector? No formula exists. The closest writable one answers
-  `false` for a company described as *"Designs GPUs"* filed under
-  Technology — it fails the easy case.
+There is no column for any of these. § 541.2 is explicit about why: a job
+title establishes nothing, **actual duties control** — and duties are prose.
+Those ten, and only those ten, go to the decision model.
 
-That one question, and only that one, goes to Jev.
+## What that buys, measured
 
-## Search, provenance, verification
+Run 25 employees through the rulebook twice: once with the decision model,
+once with it removed.
 
-- Obligations form a tree with AND and OR nodes. The search tries the cheap
-  route first and **backtracks** when it fails — the `first | t₁ | t₂`
-  combinator, as control flow rather than instruction.
-- Functions are computed on demand, never stored. One new price bar moved
-  one holding's index weight from 77.82% to 53.38%, four levels up the call
-  chain, with nothing told to update. **Nothing can go stale because nothing
-  is cached.**
-- **The policy lives in one place.** The 4.0 threshold is a line in a
-  database function, not a constant in a program. Moving it is one
-  `redefine`, and every consumer follows — the nightly job, an ad-hoc
-  query, a dashboard.
-- A verdict links the specific coverage relations and price bars it was
-  computed from **as role players, not copied values**. "Why?" is a graph
-  walk.
-- When evidence is absent, Jev returns 0.50 — *I cannot tell* — and the
-  verdict is marked as resting on a gap. Not a refusal. A binary gate must
-  guess, and both guesses are wrong.
-- The search **cannot store its own conclusion**. A verdict outside the
-  three permitted values is refused by the database:
-  `[CNT8] value '"probably-fine"' does not match the set of values`.
+```
+                 exempt   needs review   not exempt
+with the model      14          6              5
+without it           0         22              3
+```
 
-## Does a decision model help the search?
+**Without it, nothing can be cleared.** Every one of the 14 who genuinely
+qualify comes back "needs human review", because every exemption branch ends
+in a judgement and you cannot reach *exempt* without passing one.
 
-The architecture says the model should *propose* which branch to try next,
-with the type system fixing what is admissible. That front half was built
-and measured, and in this domain it does not pay: a model ordering is 9
-queries worse than sorting by a hand-written constant once both see the
-same facts, and computing the qualifying branch directly from the schema
-beats both. Branch selection here has a closed form, and anything with a
-closed form belongs in the type system — the search heuristic included.
+Three determinations survive without it, all **negative** — a line
+operative and a paramedic barred by § 541.3, and an employer under the
+§ 203(s) revenue floor. That is the asymmetry: a type system can rule people
+**out** on its own. It cannot rule anyone **in**.
 
-[PROPOSER.md](PROPOSER.md) has the five-way disjunction, the eight
-orderings measured, and the two soundness defects found in the guarantee
-that a proposer can only reorder.
+## The shape
 
----
+```
+the rulebook      a tree of tests, declared as data
+                  ↓
+the search        split a test into its parts, ask the database,
+                  ask the model — in that order
+                  ↓            ↓
+the database      19 tests      the model      10 tests
+                  exact, free                  one number, calibrated
+                  ↓
+the database      again — the search stores nothing itself
+```
 
-[EXPLAINED.md](EXPLAINED.md) — from scratch ·
-[PROPOSER.md](PROPOSER.md) — does the model help the search? ·
-[WALKTHROUGH.md](WALKTHROUGH.md) — the technical account ·
-[schema.tql](schema.tql) — the TypeDB additions
+Four properties follow:
+
+- **Nothing is ever stale**, because computed values are formulas in the
+  database rather than stored numbers.
+- **The thresholds live in one place.** Moving $684 is one `redefine`, and
+  every caller follows.
+- **Absent evidence is not a refusal.** A test nobody can settle is recorded
+  as a gap and the verdict says so, rather than being forced to yes or no.
+- **The search cannot accept its own conclusion.** A verdict outside the
+  permitted vocabulary cannot be stored at all.
+
+## What is here
+
+| | |
+|---|---|
+| [**EXPLAINED.md**](EXPLAINED.md) | the whole thing: the data model, the 19 functions, the tree, what goes to the model, a worked determination traced call by call, and the measurements |
+| [**schema.tql**](schema.tql) | the complete TypeDB schema — 30 attributes, 7 entities, 6 relations, 18 functions |
