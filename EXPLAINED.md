@@ -589,17 +589,3 @@ ex_primary_duty_is_management    p=0.95   confidence=0.90
 The record does not store "salary was $2,600". It links the findings, and
 the queries read the salary off the employee. A copied number would quietly
 disagree with reality after a correction; a link can be re-read and checked.
-
-### Three gaps, stated
-
-**A finding does not name the row it read.** `ex_salary_threshold: True` is
-recorded without "because weekly_salary was 2600 when I looked". Edit the
-salary later and nothing flags the drift.
-
-**Re-running does not link to the prior determination.** It should attach via
-a supersession morphism rather than sitting alongside. The machinery exists;
-it is not wired in here.
-
-**The reviewer's own answer is not captured.** A human settles § 541.2 and
-that should become a finding marked `settled_how: "human"`, closing the gap.
-Nothing writes it back yet.
